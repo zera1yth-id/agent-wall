@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Wall — a message wall only Agent ID holders can write on</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 640px; padding: 24px 16px 64px; line-height: 1.5; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: #666; margin: 0 0 20px; }
+  .card { border: 1px solid #ccc; border-radius: 12px; padding: 14px 16px; margin: 12px 0; }
+  .meta { font-size: 0.85rem; color: #666; display: flex; gap: 8px; flex-wrap: wrap; }
+  .meta .name { font-weight: 700; color: inherit; }
+  .badge { display: inline-block; font-size: 0.75rem; border: 1px solid #999; border-radius: 999px; padding: 0 8px; }
+  textarea { width: 100%; min-height: 72px; font: inherit; padding: 10px; border-radius: 8px; border: 1px solid #999; }
+  button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #status { font-size: 0.9rem; min-height: 1.4em; }
+  .notice { background: #fff8e1; border: 1px solid #e6c200; border-radius: 8px; padding: 12px; }
+  footer { margin-top: 32px; font-size: 0.8rem; color: #666; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<h1>🧱 Agent Wall</h1>
+<p class="sub">A public message wall on BNB Chain. Only holders of an Agent ID (<code>.ai</code> name) can write on it — one message per holder, editable once. No token, no fees beyond gas, no account, no login.</p>
+
+<div id="setup-notice" class="notice" hidden>
+  The wall contract has not been deployed to this network yet. The contract is open-source — see the project repo for the deployment record.
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="connectBtn">Connect wallet</button>
+    <span id="account"></span>
+  </div>
+  <p id="status">Connect your wallet to see whether you hold an Agent ID.</p>
+  <div id="composer" hidden>
+    <textarea id="msg" maxlength="280" placeholder="Write your message (max 280 characters)…"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="postBtn">Post to the wall</button>
+      <button id="editBtn" hidden>Edit my message</button>
+      <span id="count"></span>
+    </div>
+    <p style="font-size:0.85rem;color:#666">Posting costs only BSC gas (about $0.002). Your wallet will ask you to confirm the transaction — nothing is ever sent without your confirmation.</p>
+  </div>
+</div>
+
+<h2>The wall</h2>
+<div id="wall"><p>Loading messages…</p></div>
+
+<footer>
+  <p>Agent Wall is an independent hackathon project. It is not affiliated with, endorsed by, or connected to Binance. It never asks for your seed phrase, private key, API secret or pairing code, and it never stores a login session. All messages live on-chain in the Agent Wall contract — read the contract source on BscScan before you interact with it.</p>
+  <p id="contractLine"></p>
+</footer>
+
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.17.0/dist/ethers.umd.min.js"></script>
+<script type="module">
+import { createWeb3Name } from "https://cdn.jsdelivr.net/npm/@web3-name-sdk/core@0.4.2/+esm";
+
+const WALL_ABI = [
+  "function post(string calldata message) external",
+  "function editPost(string calldata newMessage) external",
+  "function getPosts() external view returns (tuple(address poster,string message,uint256 timestamp,bool edited)[])",
+  "function AGENT_ID() external view returns (address)",
+  "function MAX_MESSAGE_LENGTH() external view returns (uint256)",
+  "event Posted(address indexed poster, string message, uint256 timestamp)",
+];
+const AGENT_ID_ABI = ["function balanceOf(address owner) external view returns (uint256)"];
+
+const $ = (id) => document.getElementById(id);
+const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
+const esc = (s) => s.replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+let readProvider, wall, web3name = null;
+try { web3name = createWeb3Name(); } catch (e) { /* name resolution is best-effort */ }
+
+async function resolveName(address) {
+  // Best-effort .ai display name via the SPACE ID Web3 Name SDK (reverse lookup).
+  // Falls back to the shortened address when no primary name is set or the
+  // lookup fails. The name is ONLY ever shown next to its holder's own post.
+  if (!web3name) return short(address);
+  try {
+    const name = await web3name.getDomainName({ address, queryChainIdList: [CONFIG.CHAIN_ID] });
+    return name || short(address);
+  } catch (e) { return short(address); }
+}
+
+async function loadWall() {
+  const box = $("wall");
+  if (!CONFIG.CONTRACT_ADDRESS) { $("setup-notice").hidden = false; box.innerHTML = "<p>No contract deployed yet.</p>"; return; }
+  try {
+    const posts = await wall.getPosts();
+    if (!posts.length) { box.innerHTML = "<p>The wall is empty. Be the first Agent ID holder to write on it.</p>"; return; }
+    const rows = await Promise.all(posts.map(async (p) => {
+      const name = await resolveName(p.poster);
+      const when = new Date(Number(p.timestamp) * 1000).toLocaleString();
+      return `<div class="card"><div>${esc(p.message)}</div>
+        <div class="meta"><span class="name">${esc(name)}</span><span>${short(p.poster)}</span><span>${when}</span>${p.edited ? '<span class="badge">edited</span>' : ""}</div></div>`;
+    }));
+    box.innerHTML = rows.join("");
+  } catch (e) {
+    box.innerHTML = "<p>Could not load messages: " + esc(e.message || String(e)) + "</p>";
+  }
+}
+
+async function refreshComposer(signerAddress) {
+  if (!signerAddress || !CONFIG.CONTRACT_ADDRESS) return;
+  const agentId = new ethers.Contract(CONFIG.AGENT_ID, AGENT_ID_ABI, readProvider);
+  const holds = (await agentId.balanceOf(signerAddress)) > 0n;
+  const posts = await wall.getPosts();
+  const mine = posts.find((p) => p.poster.toLowerCase() === signerAddress.toLowerCase());
+  $("count").textContent = `${posts.length} message${posts.length === 1 ? "" : "s"} on the wall`;
+  if (!holds) {
+    $("status").textContent = "This wallet holds no Agent ID, so it cannot post. Only Agent ID holders can write on the wall.";
+    $("composer").hidden = true;
+    return;
+  }
+  $("composer").hidden = false;
+  if (mine) {
+    $("status").textContent = "You hold an Agent ID and already have a message on the wall." + (mine.edited ? " It has been edited once and cannot be edited again." : " You can edit it once.");
+    $("msg").value = mine.message;
+    $("postBtn").hidden = true;
+    $("editBtn").hidden = !!mine.edited;
+  } else {
+    $("status").textContent = "You hold an Agent ID — you can post one message.";
+    $("postBtn").hidden = false;
+    $("editBtn").hidden = true;
+  }
+}
+
+$("connectBtn").onclick = async () => {
+  if (!window.ethereum) { $("status").textContent = "No injected wallet found. Install MetaMask or open this page in the Binance Wallet app browser."; return; }
+  try {
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const network = await provider.getNetwork();
+    if (Number(network.chainId) !== CONFIG.CHAIN_ID) {
+      $("status").textContent = `Please switch your wallet to ${CONFIG.CHAIN_NAME} (chainId ${CONFIG.CHAIN_ID}).`;
+      return;
+    }
+    const signer = await provider.getSigner();
+    const address = await signer.getAddress();
+    $("account").textContent = short(address);
+    $("status").textContent = "Connected: " + short(address);
+    const w = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, WALL_ABI, signer);
+    window._signerWall = w;
+    await refreshComposer(address);
+  } catch (e) {
+    $("status").textContent = "Connection failed: " + (e.message || e);
+  }
+};
+
+$("postBtn").onclick = async () => {
+  const text = $("msg").value.trim();
+  if (!text) return;
+  $("status").textContent = "Confirm the transaction in your wallet…";
+  try {
+    const tx = await window._signerWall.post(text);
+    $("status").textContent = "Transaction sent: " + tx.hash + " — waiting for confirmation…";
+    await tx.wait();
+    $("status").textContent = "Posted! Your message is now on the wall.";
+    await loadWall(); await refreshComposer(await window._signerWall.runner.getAddress());
+  } catch (e) { $("status").textContent = "Post failed: " + (e.reason || e.message || e); }
+};
+
+$("editBtn").onclick = async () => {
+  const text = $("msg").value.trim();
+  if (!text) return;
+  $("status").textContent = "Confirm the transaction in your wallet…";
+  try {
+    const tx = await window._signerWall.editPost(text);
+    $("status").textContent = "Transaction sent: " + tx.hash + " — waiting for confirmation…";
+    await tx.wait();
+    $("status").textContent = "Edited! (One edit only — that was it.)";
+    await loadWall(); await refreshComposer(await window._signerWall.runner.getAddress());
+  } catch (e) { $("status").textContent = "Edit failed: " + (e.reason || e.message || e); }
+};
+
+(async () => {
+  readProvider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
+  if (CONFIG.CONTRACT_ADDRESS) {
+    wall = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, WALL_ABI, readProvider);
+    $("contractLine").innerHTML = `Contract: <a href="${CONFIG.EXPLORER}/address/${CONFIG.CONTRACT_ADDRESS}" target="_blank" rel="noopener">${CONFIG.CONTRACT_ADDRESS}</a> (${esc(CONFIG.CHAIN_NAME)})`;
+  }
+  await loadWall();
+})();
+</script>
+</body>
+</html>
